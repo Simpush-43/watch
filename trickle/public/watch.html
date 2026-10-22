@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Watch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+</head>
+<body>
+<main>
+  <h1 id="title" style="font-size:clamp(26px,5vw,38px)">Loading</h1>
+  <p class="note" id="msg"></p>
+  <div class="player hidden" id="box"><video id="v" controls playsinline preload="metadata"></video></div>
+  <div class="bar hidden" id="bar">
+    <div>
+      <label for="q">Quality</label>
+      <select id="q"></select>
+    </div>
+    <div class="used"><b id="used">0.0</b> MB<span>downloaded this visit</span></div>
+  </div>
+  <p class="note hidden" id="more">Higher qualities are still being prepared. Reload later to see them.</p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const id = location.pathname.split('/').pop();
+let bytes = 0, hls = null;
+
+async function init() {
+  const r = await fetch('/api/videos/' + id);
+  if (!r.ok) { $('title').textContent = 'Video not found'; return; }
+  const m = await r.json();
+  $('title').textContent = m.title; document.title = m.title;
+
+  if (m.done.length === 0) {
+    if (m.status === 'failed') { $('msg').textContent = 'This video failed to process.'; return; }
+    $('msg').textContent = 'Still being prepared. This page checks again every few seconds.';
+    setTimeout(init, 4000); return;
+  }
+  $('msg').textContent = '';
+  $('box').classList.remove('hidden'); $('bar').classList.remove('hidden');
+  if (m.status === 'processing') $('more').classList.remove('hidden');
+  start(m);
+}
+
+function start(m) {
+  const video = $('v');
+  const src = `/media/${id}/master.m3u8`;
+  if (window.Hls && Hls.isSupported()) {
+    hls = new Hls({ startLevel: 0, capLevelToPlayerSize: false, maxBufferLength: 20, maxMaxBufferLength: 30 });
+    hls.loadSource(src); hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      const lv = hls.levels;
+      const opts = lv.map((l, i) => {
+        const mbh = Math.round(l.bitrate * 3600 / 8 / 1e6);
+        return `<option value="${i}">${l.name || (l.height + 'p')}  (about ${mbh} MB/hour)</option>`;
+      });
+      $('q').innerHTML = opts.join('');
+      // Prefer 480p at a reduced bitrate; fall back for lower-resolution uploads.
+      let def = lv.findIndex((l) => l.name === '480p');
+      if (def < 0) def = lv.findIndex((l) => l.name === '240p');
+      if (def < 0) def = 0;
+      $('q').value = def; hls.currentLevel = def;
+      if (lv.length > 1) $('q').insertAdjacentHTML('beforeend', '<option value="-1">Auto (can use more data)</option>');
+    });
+    hls.on(Hls.Events.FRAG_LOADED, (_, d) => {
+      bytes += (d.stats && (d.stats.total || d.stats.loaded)) || 0;
+      $('used').textContent = (bytes / 1e6).toFixed(1);
+    });
+    $('q').addEventListener('change', () => { hls.currentLevel = parseInt($('q').value, 10); });
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    // Safari / iOS has no quality picker, so use the 480p rendition when available.
+    const nativeLevel = m.done.includes('480p') ? '480p' : (m.done.includes('240p') ? '240p' : m.done[0]);
+    video.src = `/media/${id}/${nativeLevel}/index.m3u8`;
+    $('q').innerHTML = '<option>Automatic (this browser)</option>'; $('q').disabled = true;
+    $('used').textContent = 'n/a';
+  } else {
+    $('msg').textContent = 'This browser cannot play streamed video.';
+  }
+}
+init();
+</script>
+</body>
+</html>

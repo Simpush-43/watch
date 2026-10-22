@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trickle: upload once, watch on almost no data</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <h1>Trickle</h1>
+  <p class="lede">Upload a video once. Your friend opens the link and watches it on a fraction of the data.</p>
+
+  <div class="meter" id="meter" aria-label="Data used per hour of video"></div>
+  <p class="note">Per hour of video. The grey bar is a typical 1080p file. The watch page starts at 480p (about 247 MB/hour) when available; choose a lower resolution to save more data.</p>
+
+  <h2>Upload</h2>
+  <form class="card" id="form">
+    <div class="field hidden" id="pwField">
+      <label for="pw">Password</label>
+      <input type="password" id="pw" autocomplete="current-password">
+    </div>
+    <div class="field">
+      <label for="title">Title (optional)</label>
+      <input type="text" id="title" maxlength="120">
+    </div>
+    <label class="drop" id="drop">
+      <input type="file" id="file" accept="video/*,.mkv,.mov,.avi,.webm">
+      <span id="dropText">Choose a video, or drop it here</span>
+    </label>
+    <div class="prog hidden" id="prog"><div id="progBar"></div></div>
+    <p class="err hidden" id="err" role="alert"></p>
+    <p style="margin:16px 0 0"><button type="submit" id="go" disabled>Upload and shrink</button></p>
+  </form>
+
+  <h2>Your videos</h2>
+  <div class="list" id="list"><p class="note">Nothing yet. Uploaded videos show up here.</p></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let cfg = { needsPassword: false, ladder: [] };
+let pollTimer = null;
+
+const pw = () => (cfg.needsPassword ? $('pw').value : '');
+const headers = () => (cfg.needsPassword ? { 'x-password': pw() } : {});
+const mbPerHour = (bw) => Math.round((bw * 3600) / 8 / 1e6);
+const fmtDur = (s) => { s = Math.round(s); const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60;
+  return (h ? h + ':' + String(m).padStart(2,'0') : m) + ':' + String(x).padStart(2,'0'); };
+
+function drawMeter() {
+  const REF = 2000; // typical 1080p, MB/hour
+  const rows = [...cfg.ladder].sort((a, b) => a.bw - b.bw).map((r) => [r.name, mbPerHour(r.bw), false]);
+  rows.push(['1080p', REF, true]);
+  $('meter').innerHTML = rows.map(([n, mb, ref]) =>
+    `<div class="row ${ref ? 'ref' : ''}"><span class="name">${n}</span>
+     <div class="track"><div class="fill" style="width:${(mb / REF) * 100}%"></div></div>
+     <span class="val">${mb.toLocaleString()} MB</span></div>`).join('');
+}
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+async function loadList() {
+  const r = await fetch('/api/videos', { headers: headers() });
+  if (r.status === 401) { $('list').innerHTML = '<p class="note">Enter the password above to see your videos.</p>'; return; }
+  const vids = await r.json();
+  if (!vids.length) { $('list').innerHTML = '<p class="note">Nothing yet. Uploaded videos show up here.</p>'; return; }
+  $('list').innerHTML = vids.map((v) => {
+    let status;
+    if (v.status === 'failed') status = 'Failed: ' + esc(v.error || 'unknown error');
+    else if (v.status === 'processing') status = `Shrinking: ${v.done.length} of ${v.plan.length} qualities ready` + (v.current ? ` (working on ${v.current})` : '');
+    else status = `Ready, ${v.done.join(', ')}` + (v.error ? ' (some qualities failed)' : '');
+    const canWatch = v.done.length > 0;
+    return `<div class="item" data-id="${v.id}">
+      <div class="t">${esc(v.title)} <span class="note">${fmtDur(v.duration)}</span></div>
+      <div class="s">${status}</div>
+      <div class="a">
+        ${canWatch ? `<button class="ghost" data-copy>Copy link</button><a class="btn" href="/v/${v.id}" style="text-decoration:none;padding:7px 12px;font-size:14px">Watch</a>` : ''}
+        <button class="ghost" data-del>Delete</button>
+      </div></div>`;
+  }).join('');
+  clearTimeout(pollTimer);
+  if (vids.some((v) => v.status === 'processing')) pollTimer = setTimeout(loadList, 3000);
+}
+
+$('list').addEventListener('click', async (e) => {
+  const item = e.target.closest('.item'); if (!item) return;
+  const id = item.dataset.id;
+  if (e.target.dataset.copy !== undefined) {
+    const url = location.origin + '/v/' + id;
+    try { await navigator.clipboard.writeText(url); e.target.textContent = 'Copied'; }
+    catch { prompt('Copy this link:', url); }
+    setTimeout(() => (e.target.textContent = 'Copy link'), 1500);
+  }
+  if (e.target.dataset.del !== undefined && confirm('Delete this video for good?')) {
+    await fetch('/api/videos/' + id, { method: 'DELETE', headers: headers() });
+    loadList();
+  }
+});
+
+const fileInput = $('file');
+function picked() {
+  const f = fileInput.files[0];
+  $('dropText').textContent = f ? `${f.name} (${(f.size / 1e6).toFixed(0)} MB)` : 'Choose a video, or drop it here';
+  $('go').disabled = !f;
+}
+fileInput.addEventListener('change', picked);
+['dragover', 'dragenter'].forEach((ev) => $('drop').addEventListener(ev, (e) => { e.preventDefault(); $('drop').classList.add('over'); }));
+['dragleave', 'drop'].forEach((ev) => $('drop').addEventListener(ev, () => $('drop').classList.remove('over')));
+$('drop').addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer.files[0]) { fileInput.files = e.dataTransfer.files; picked(); } });
+
+$('form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = fileInput.files[0]; if (!f) return;
+  const fd = new FormData();
+  fd.append('title', $('title').value);
+  fd.append('video', f);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/upload');
+  if (cfg.needsPassword) xhr.setRequestHeader('x-password', pw());
+  $('err').classList.add('hidden'); $('prog').classList.remove('hidden'); $('go').disabled = true;
+  xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) $('progBar').style.width = (ev.loaded / ev.total * 100) + '%'; };
+  xhr.onload = () => {
+    $('prog').classList.add('hidden'); $('progBar').style.width = '0';
+    if (xhr.status === 200) {
+      fileInput.value = ''; $('title').value = ''; picked(); loadList();
+    } else {
+      let msg = 'Upload failed'; try { msg = JSON.parse(xhr.responseText).error || msg; } catch {}
+      $('err').textContent = msg; $('err').classList.remove('hidden'); $('go').disabled = false;
+    }
+  };
+  xhr.onerror = () => { $('prog').classList.add('hidden'); $('err').textContent = 'Network error during upload. Try again.'; $('err').classList.remove('hidden'); $('go').disabled = false; };
+  xhr.send(fd);
+});
+
+(async () => {
+  cfg = await (await fetch('/api/config')).json();
+  drawMeter();
+  if (cfg.needsPassword) {
+    $('pwField').classList.remove('hidden');
+    $('pw').value = sessionStorage.getItem('trickle-pw') || '';
+    $('pw').addEventListener('change', () => { sessionStorage.setItem('trickle-pw', $('pw').value); loadList(); });
+  }
+  loadList();
+})();
+</script>
+</body>
+</html>
